@@ -18,9 +18,16 @@ RELEASE="${BASE}/releases/${BUILD_ID}"
 UNIT="${APP}-${ENVIRONMENT}"
 URL="https://${UNIT}.${EXAMPLES_DOMAIN:?EXAMPLES_DOMAIN is not set}"
 
-# If anything below fails, do not leave the site on the maintenance page: start the unit again (the symlink
+# However this script ends early, do not leave the site on the maintenance page: start the unit again (the symlink
 # still points at the previous release unless the switch itself succeeded).
-trap 'echo "ERROR: deployment failed, starting ${UNIT} again" >&2; ssh deploy "sudo systemctl start '"'${UNIT}'"'" || true' ERR
+finished=false
+restart_on_failure() {
+  if [ "${finished}" != "true" ]; then
+    echo "ERROR: deployment did not finish, starting ${UNIT} again" >&2
+    ssh deploy "sudo systemctl start '${UNIT}'" || true
+  fi
+}
+trap restart_on_failure EXIT
 
 echo "==> stop ${UNIT}: visitors now get the maintenance page from Caddy"
 ssh deploy "sudo systemctl stop '${UNIT}'"
@@ -45,7 +52,7 @@ curl -fsS -o /dev/null --retry 30 --retry-delay 2 --retry-all-errors "${URL}/hea
 curl -fsS "${URL}/info" | tee /dev/stderr | grep -q "\"build\":\"${BUILD_ID}\"" \
   || { echo; echo "ERROR: ${URL} is up but does not run build ${BUILD_ID}" >&2; exit 1; }
 echo
-trap - ERR
+finished=true
 
 echo "==> keep the last ${KEEP} releases"
 ssh deploy "cd '${BASE}/releases' && current=\$(readlink -f '${BASE}/current') && ls -1dt */ | tail -n +$((KEEP + 1)) | while read -r d; do [ \"\$(readlink -f \"\$d\")\" = \"\$current\" ] || rm -rf -- \"\$d\"; done; ls -1 ."
