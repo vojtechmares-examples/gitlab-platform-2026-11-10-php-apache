@@ -1,0 +1,5 @@
+vendor/
+build.json
+.phpunit.cache/
+composer.phar
+.phpunit.result.cache

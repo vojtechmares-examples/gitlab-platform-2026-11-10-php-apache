@@ -1,0 +1,4 @@
+# Everything that is not a file goes to the front controller
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ index.php [L]

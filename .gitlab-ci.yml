@@ -1,0 +1,126 @@
+# PHP 8.5 on Apache. Composer runs in the pipeline, the finished application is copied with rsync to a directory per
+# deployment (the pipeline id), and a symlink selects the live one.
+#   test        PHPUnit
+#   build       composer install --no-dev  ->  artifact with the application and vendor/
+#   staging     stop Apache (maintenance page from Caddy), rsync, switch symlink, start Apache   (automatic)
+#   production  the same                                                                            (manual)
+
+include:
+  - project: examples/ci-templates
+    ref: main
+    file: /rocky.yml
+
+stages: [test, build, staging, production]
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+variables:
+  APP: php-apache
+  COMPOSER_ALLOW_SUPERUSER: "1"
+  COMPOSER_CACHE_DIR: "$CI_PROJECT_DIR/.composer-cache"
+
+# Rocky Linux with PHP 8.5 from the Remi module stream and Composer from EPEL
+.php:
+  image: rockylinux/rockylinux:10
+  before_script:
+    - !reference [.rocky-dnf, before_script]
+    - dnf -y -q install epel-release
+    - dnf -y -q install https://rpms.remirepo.net/enterprise/remi-release-10.rpm --nogpgcheck
+    - dnf -y -q module enable php:remi-8.5
+    - dnf -y -q install php-cli php-mbstring php-xml php-intl composer unzip git
+    - php -v | head -1
+  cache:
+    key: composer-$APP
+    paths: [.composer-cache/]
+
+test:
+  extends: .php
+  stage: test
+  script:
+    - composer install --no-interaction --prefer-dist
+    - vendor/bin/phpunit --log-junit phpunit-junit.xml
+  artifacts:
+    when: always
+    reports:
+      junit: phpunit-junit.xml
+
+build:
+  extends: .php
+  stage: build
+  script:
+    - composer install --no-interaction --prefer-dist --no-dev --optimize-autoloader
+    - printf '{"build":"%s","version":"1.0.0"}\n' "$CI_PIPELINE_ID" > build.json
+  artifacts:
+    paths: [src/, public/, vendor/, build.json, composer.json, composer.lock]
+    expire_in: 1 week
+
+.deploy:
+  image: rockylinux/rockylinux:10
+  needs: [build]
+  resource_group: $APP-$DEPLOY_ENV
+  before_script:
+    - !reference [.rocky-dnf, before_script]
+    - dnf -y -q install openssh-clients rsync curl
+    - !reference [.ssh-setup, before_script]
+  script:
+    - deploy/release.sh $DEPLOY_ENV
+
+deploy:staging:
+  extends: .deploy
+  stage: staging
+  variables:
+    DEPLOY_ENV: staging
+  environment:
+    name: staging
+    url: https://$APP-staging.$EXAMPLES_DOMAIN
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy:production:
+  extends: .deploy
+  stage: production
+  needs: [build, deploy:staging]
+  variables:
+    DEPLOY_ENV: production
+  environment:
+    name: production
+    url: https://$APP-production.$EXAMPLES_DOMAIN
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+
+.rollback:
+  image: rockylinux/rockylinux:10
+  needs: []
+  before_script:
+    - !reference [.rocky-dnf, before_script]
+    - dnf -y -q install openssh-clients curl
+    - !reference [.ssh-setup, before_script]
+  script:
+    - deploy/rollback.sh $DEPLOY_ENV
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true
+
+rollback:staging:
+  extends: .rollback
+  stage: staging
+  variables:
+    DEPLOY_ENV: staging
+  environment:
+    name: staging
+    action: access
+
+rollback:production:
+  extends: .rollback
+  stage: production
+  variables:
+    DEPLOY_ENV: production
+  environment:
+    name: production
+    action: access
